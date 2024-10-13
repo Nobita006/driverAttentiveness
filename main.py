@@ -18,6 +18,10 @@ FRAME_DELAY = int(1000 / FPS)  # Time per frame in milliseconds
 detector = dlib.get_frontal_face_detector()
 predictor = dlib.shape_predictor("shape_predictor_68_face_landmarks.dat")
 
+# Head pose rotation angle thresholds for distraction detection (in degrees)
+YAW_THRESHOLD = 20  # Yaw (left/right) head turn tolerance
+PITCH_THRESHOLD = 15  # Pitch (up/down) head tilt tolerance
+
 # Function to calculate Eye Aspect Ratio (EAR)
 def eye_aspect_ratio(eye):
     A = dist.euclidean(eye[1], eye[5])
@@ -26,7 +30,7 @@ def eye_aspect_ratio(eye):
     ear = (A + B) / (2.0 * C)
     return ear
 
-# Function to calculate the head pose (to check distraction)
+# Function to calculate the head pose and get rotation angles
 def get_head_pose(shape):
     image_points = np.array([
         shape[33],  # Nose tip
@@ -46,7 +50,7 @@ def get_head_pose(shape):
         (150.0, -150.0, -125.0)      # Right Mouth corner
     ])
 
-    focal_length = 1 * frame.shape[1]
+    focal_length = frame.shape[1]
     center = (frame.shape[1] // 2, frame.shape[0] // 2)
     camera_matrix = np.array(
         [[focal_length, 0, center[0]],
@@ -54,15 +58,20 @@ def get_head_pose(shape):
          [0, 0, 1]], dtype="double"
     )
     dist_coeffs = np.zeros((4, 1))  # Assuming no lens distortion
-    success, rotation_vector, translation_vector = cv2.solvePnP(model_points, image_points, camera_matrix, dist_coeffs)
-    (nose_end_point2D, jacobian) = cv2.projectPoints(np.array([(0.0, 0.0, 1000.0)]), rotation_vector, translation_vector, camera_matrix, dist_coeffs)
     
-    p1 = (int(image_points[0][0]), int(image_points[0][1]))
-    p2 = (int(nose_end_point2D[0][0][0]), int(nose_end_point2D[0][0][1]))
+    # SolvePnP gives us the rotation vector (angles) and translation vector (position)
+    success, rotation_vector, translation_vector = cv2.solvePnP(
+        model_points, image_points, camera_matrix, dist_coeffs, flags=cv2.SOLVEPNP_ITERATIVE)
     
-    return p1, p2
+    # Convert the rotation vector into Euler angles (yaw, pitch, and roll)
+    rotation_matrix, jacobian = cv2.Rodrigues(rotation_vector)
+    euler_angles = cv2.decomposeProjectionMatrix(np.hstack((rotation_matrix, translation_vector)))[6]
+    
+    pitch, yaw, roll = euler_angles[0], euler_angles[1], euler_angles[2]  # Get pitch, yaw, roll in degrees
+    
+    return pitch, yaw
 
-# Start video stream from webcam
+# Start video stream from the second camera (index 1)
 cap = cv2.VideoCapture(0)
 
 # Store the last frame processing time
@@ -104,9 +113,8 @@ while True:
             cv2.drawContours(frame, [leftEyeHull], -1, (0, 255, 0), 1)
             cv2.drawContours(frame, [rightEyeHull], -1, (0, 255, 0), 1)
 
-            # Head pose detection
-            p1, p2 = get_head_pose(shape)
-            cv2.line(frame, p1, p2, (255, 0, 0), 2)
+            # Head pose detection using Euler angles
+            pitch, yaw = get_head_pose(shape)
 
             # Check if EAR is below the threshold, implying eyes are closed (sleepy)
             if ear < EYE_AR_THRESH:
@@ -119,8 +127,8 @@ while True:
             else:
                 COUNTER = 0
             
-            # Check distraction by analyzing head pose
-            if p2[1] > p1[1] + 20:  # Assuming downward tilt or away from road
+            # Check distraction by analyzing head pose angles (yaw and pitch)
+            if abs(yaw) > YAW_THRESHOLD or abs(pitch) > PITCH_THRESHOLD:
                 cv2.putText(frame, "DISTRACTED! Focus on the road!", (10, 60), 
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
